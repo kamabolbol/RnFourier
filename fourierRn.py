@@ -2,80 +2,101 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-# Time vector that will be used as input of our NN
-t_numpy = np.arange(0, 5.01, 0.01, dtype=np.float32)
+# FourierNet Definition for Periodic PDEs
+class FourierNet(nn.Module):
+    def __init__(self, input_size=2, hidden_size=50, output_size=1):
+        super(FourierNet, self).__init__()
+        self.hidden_size = hidden_size
 
-# Neural Network Definition
-class NeuralNet(nn.Module):
-    def __init__(self, hidden_size, output_size=1, input_size=1):
-        super(NeuralNet, self).__init__()
-        self.l1 = nn.Linear(input_size, hidden_size)
-        self.relu1 = nn.LeakyReLU()
-        self.l2 = nn.Linear(hidden_size, hidden_size)
-        self.relu2 = nn.LeakyReLU()
-        self.l3 = nn.Linear(hidden_size, hidden_size)
-        self.relu3 = nn.LeakyReLU()
-        self.l4 = nn.Linear(hidden_size, output_size)
+        # Frequency embedding with sinusoids
+        self.freqs = nn.Parameter(torch.linspace(1.0, 10.0, hidden_size).reshape(1, -1))
+        self.linear_out = nn.Linear(hidden_size * 2, output_size)
 
     def forward(self, x):
-        out = self.l1(x)
-        out = self.relu1(out)
-        out = self.l2(out)
-        out = self.relu2(out)
-        out = self.l3(out)
-        out = self.relu3(out)
-        out = self.l4(out)
+        x_proj = x @ self.freqs  # projection: [batch, hidden_size]
+        sin_feat = torch.sin(2 * np.pi * x_proj)
+        cos_feat = torch.cos(2 * np.pi * x_proj)
+        fourier_feat = torch.cat([sin_feat, cos_feat], dim=-1)
+        out = self.linear_out(fourier_feat)
         return out
 
-# Convert numpy array to torch tensor and set requires_grad
-t_train = torch.from_numpy(t_numpy).reshape(len(t_numpy), 1)
-t_train.requires_grad_(True)
 
-# Constant for the model
-k = 1
+#  Compute derivatives
 
-# Instantiate the model with 50 neurons in the hidden layers
-model = NeuralNet(hidden_size=50)
+def gradient(y, x):
+    return torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y), create_graph=True)[0]
 
-# Loss and optimizer
-learning_rate = 8e-3
-optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-criterion = nn.MSELoss()  # Loss for the differential equation
-initial_condition_loss = nn.MSELoss()  # Loss for the initial condition
+def laplacian(y, x):
+    grad_y = gradient(y, x)
+    return gradient(grad_y, x)
 
-# Number of epochs
-num_epochs = int(1e4)
 
-# Training loop
-for epoch in range(num_epochs):
-    # Randomly perturbing the training points to have a wider range of times
-    epsilon = torch.normal(0, 0.1, size=(len(t_train), 1)).float()
-    t_perturbed = t_train + epsilon
+def run_solver(problem='heat'):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = FourierNet(input_size=2, hidden_size=50).to(device)
 
-    # Forward pass
-    y_pred = model(t_train)
+    x = np.linspace(0, 1, 100)
+    t = np.linspace(0, 1, 100)
+    X, T = np.meshgrid(x, t)
+    xt = np.stack([X.flatten(), T.flatten()], axis=1).astype(np.float32)
+    xt_tensor = torch.tensor(xt, requires_grad=True).to(device)
 
-    # Calculate the derivative of the forward pass w.r.t. the input (t)
-    dy_dt = torch.autograd.grad(
-        y_pred,
-        t_train,
-        grad_outputs=torch.ones_like(y_pred),
-        create_graph=True
-    )[0]
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    mse = nn.MSELoss()
 
-    # Define the differential equation and calculate the loss
-    loss_DE = criterion(dy_dt + k * y_pred, torch.zeros_like(dy_dt))
+    for epoch in range(5000):
+        u = model(xt_tensor)
 
-    # Define the initial condition loss (y(0) = 1)
-    loss_IC = initial_condition_loss(model(torch.tensor([[0.0]])), torch.tensor([[1.0]]))
+        x_input = xt_tensor[:, 0:1].clone().detach().requires_grad_(True)
+        t_input = xt_tensor[:, 1:2].clone().detach().requires_grad_(True)
+        xt_input = torch.cat([x_input, t_input], dim=1).to(device)
+        u = model(xt_input)
 
-    # Total loss
-    loss = loss_DE + loss_IC
+        u_t = gradient(u, t_input)
+        u_x = gradient(u, x_input)
+        u_xx = gradient(u_x, x_input)
+        u_tt = gradient(u_t, t_input)
 
-    # Backward pass and weight update
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+        if problem == 'heat':
+            alpha = 0.1
+            pde_residual = u_t - alpha * u_xx
+        elif problem == 'wave':
+            c = 1.0
+            pde_residual = u_tt - c ** 2 * u_xx
+        elif problem == 'schrodinger':
+            u_real, u_imag = torch.chunk(u, 2, dim=1)
+            u = u_real + 1j * u_imag
+            u_xx = laplacian(u, x_input)
+            u_t = gradient(u, t_input)
+            pde_residual = u_t + 0.5j * u_xx
+            loss = torch.mean(torch.abs(pde_residual) ** 2)
+        elif problem == 'laplace':
+            pde_residual = u_xx
+        elif problem == 'poisson':
+            rho = torch.sin(np.pi * x_input).to(device)
+            pde_residual = u_xx + rho
+        elif problem == 'pendulum':
+            u_tt = gradient(gradient(u, t_input), t_input)
+            pde_residual = u_tt + torch.sin(u)
+        else:
+            raise ValueError("Unsupported problem type")
 
-    if epoch % 1000 == 0:
-        print(f"Epoch {epoch}/{num_epochs}, Loss: {loss.item():.6f}")
+        if problem not in ['schrodinger']:
+            loss = mse(pde_residual, torch.zeros_like(pde_residual))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 500 == 0:
+            print(f"Epoch {epoch}, Loss: {loss.item():.6f}")
+
+
+# Run for different PDEs:
+
+run_solver(problem='heat')        # Equation de la chaleur
+# run_solver(problem='wave')      #  Equation d'onde
+# run_solver(problem='schrodinger') # Equation de Schrödinger (complex)
+# run_solver(problem='laplace')   # Equation de Laplace
+# run_solver(problem='poisson')   # Equation de Poisson
+# run_solver(problem='pendulum')  #  EDO périodique non linéaire
