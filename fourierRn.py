@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-# Définition du réseau de neurones
+# Time vector that will be used as input of our NN
+t_numpy = np.arange(0, 5.01, 0.01, dtype=np.float32)
+
+# Neural Network Definition
 class NeuralNet(nn.Module):
     def __init__(self, hidden_size, output_size=1, input_size=1):
         super(NeuralNet, self).__init__()
@@ -24,39 +27,35 @@ class NeuralNet(nn.Module):
         out = self.l4(out)
         return out
 
-# Vecteur temporel
-t_numpy = np.arange(0, 5 + 0.01, 0.01, dtype=np.float32)
-t = torch.from_numpy(t_numpy).reshape(len(t_numpy), 1)
-t.requires_grad_(True)
+# Convert numpy array to torch tensor and set requires_grad
+t_train = torch.from_numpy(t_numpy).reshape(len(t_numpy), 1)
+t_train.requires_grad_(True)
 
-# Constante du modèle
-k = 1.0
+# Constant for the model
+k = 1
 
-# Instanciation du modèle
+# Instantiate the model with 50 neurons in the hidden layers
 model = NeuralNet(hidden_size=50)
 
-# Fonction de perte (MSE)
-criterion = nn.MSELoss()
-
-# Optimiseur
+# Loss and optimizer
 learning_rate = 8e-3
 optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+criterion = nn.MSELoss()  # Loss for the differential equation
+initial_condition_loss = nn.MSELoss()  # Loss for the initial condition
 
-# Fonction de perte pour la condition initiale
-def initial_condition_loss(y_pred, y_true):
-    return criterion(y_pred, y_true)
-
-# Entraînement
+# Number of epochs
 num_epochs = int(1e4)
+
+# Training loop
 for epoch in range(num_epochs):
-    # Perturbation aléatoire
-    epsilon = torch.normal(0, 0.1, size=(len(t), 1)).float()
-    t_train = t + epsilon
+    # Randomly perturbing the training points to have a wider range of times
+    epsilon = torch.normal(0, 0.1, size=(len(t_train), 1)).float()
+    t_perturbed = t_train + epsilon
 
     # Forward pass
     y_pred = model(t_train)
 
-    # Calcul de la dérivée dy/dt
+    # Calculate the derivative of the forward pass w.r.t. the input (t)
     dy_dt = torch.autograd.grad(
         y_pred,
         t_train,
@@ -64,22 +63,19 @@ for epoch in range(num_epochs):
         create_graph=True
     )[0]
 
-    # Perte de l'équation différentielle
+    # Define the differential equation and calculate the loss
     loss_DE = criterion(dy_dt + k * y_pred, torch.zeros_like(dy_dt))
 
-    # Perte de la condition initiale : y(0) = 1
-    loss_IC = initial_condition_loss(
-        model(torch.tensor([[0.0]])), torch.tensor([[1.0]])
-    )
+    # Define the initial condition loss (y(0) = 1)
+    loss_IC = initial_condition_loss(model(torch.tensor([[0.0]])), torch.tensor([[1.0]]))
 
-    # Perte totale
+    # Total loss
     loss = loss_DE + loss_IC
 
-    # Rétropropagation
+    # Backward pass and weight update
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
-    # Affichage de la perte
     if epoch % 1000 == 0:
-        print(f"Epoch {epoch}, Loss: {loss.item():.6f}")
+        print(f"Epoch {epoch}/{num_epochs}, Loss: {loss.item():.6f}")
